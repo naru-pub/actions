@@ -180,11 +180,17 @@ async function postJson(url, token, body) {
   try {
     data = text ? JSON.parse(text) : {};
   } catch {
-    data = { message: text };
+    data = {
+      message: text
+        ? `${response.status} ${response.statusText}: ${text.slice(0, 300)}`
+        : `${response.status} ${response.statusText}`,
+    };
   }
 
   if (!response.ok || data.success === false) {
-    throw new Error(data.message || `Request failed: ${response.status}`);
+    throw new Error(
+      data.message || `Request failed: ${response.status} ${url}`,
+    );
   }
 
   return data;
