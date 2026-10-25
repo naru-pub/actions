@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: pnpm install && pnpm build
-      - uses: naru-pub/deploy-action@v1
+      - uses: naru-pub/actions/deploy@v1
         with:
           site: my-naru-login
           dir: dist
