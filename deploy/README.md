@@ -48,6 +48,10 @@ If published from a multi-action repository, use:
 - `endpoint`: Naru control-plane endpoint. Defaults to `https://naru.pub`.
 - `audience`: GitHub OIDC audience. Defaults to the endpoint origin.
 - `finalize`: publish after upload. Defaults to `true`.
+- `template-owner` / `template`: publish `dir` as a board template's next
+  version instead (see below).
+- `preview`: with a template, an image to show for it instead of a
+  screenshot (see below).
 
 ## Outputs
 
@@ -55,3 +59,53 @@ If published from a multi-action repository, use:
 - `deployed-files`
 - `deleted-files`
 - `directory-size`
+
+## Publishing a template
+
+A board template whose versions come from GitHub Actions names its repository,
+branch and folder on its post. Its workflow publishes that folder with
+`template-owner`, the Naru account that posted the template, instead of
+`site`: each run publishes `dir` as the template's next version, with the
+commit message as its changelog, and the sites that installed it are told (or
+updated, if they chose automatic updates).
+
+```yaml
+- uses: naru-pub/actions/deploy@v1
+  with:
+    dir: dist
+    template-owner: my-naru-login
+```
+
+The workflow can come first: until a post names this repository, branch and
+`dir`, a run does nothing and succeeds. Only files that changed since the
+previous version are uploaded, and a run with exactly the latest version's
+files makes no new version. So one repository can keep several templates,
+one folder each, and publish them all on every push:
+
+```yaml
+- uses: naru-pub/actions/deploy@v1
+  with:
+    dir: templates/guestbook
+    template-owner: my-naru-login
+- uses: naru-pub/actions/deploy@v1
+  with:
+    dir: templates/link-tree
+    template-owner: my-naru-login
+```
+
+`template: <id>` (the ID on the template's edit page) publishes to one
+template by ID instead.
+
+A template that shows nothing from its files alone (an app that needs its
+site's data or a sign-in) can name a `preview` image, which the board and its
+post show instead of a screenshot. PNG, JPEG or WebP up to 5 MB, shown at 4:3
+from the top (1280×960 fits); it is uploaded only when it changes, and can
+live outside `dir`:
+
+```yaml
+- uses: naru-pub/actions/deploy@v1
+  with:
+    dir: dist
+    template-owner: my-naru-login
+    preview: docs/preview.png
+```

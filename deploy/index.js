@@ -14,7 +14,10 @@ const FILE_EXTENSION_MIMETYPE_MAP = {
   css: "text/css",
   txt: "text/plain",
   js: "application/javascript",
+  mjs: "application/javascript",
   json: "application/json",
+  // Site code's migrations (_naru/migrations/*.sql).
+  sql: "application/sql",
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -60,6 +63,12 @@ function setOutput(name, value) {
   const output = process.env.GITHUB_OUTPUT;
   if (!output) return;
   return fs.appendFile(output, `${name}=${value}\n`);
+}
+
+function appendStepSummary(markdown) {
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  if (!summary) return;
+  return fs.appendFile(summary, markdown);
 }
 
 function setFailed(error) {
@@ -229,8 +238,93 @@ async function uploadFiles(uploads, fileByPath, concurrency = 4) {
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 }
 
+// Finalize publishes the files and answers before the site's code (its
+// queries, mutations, routes and migrations) is active: activation can take
+// minutes. Wait for it, so a release the site refuses fails the workflow.
+const FUNCTIONS_TIMEOUT_MS = 15 * 60 * 1000;
+const FUNCTIONS_POLL_MS = 5000;
+
+async function waitForFunctions(endpoint, audience, deploymentId) {
+  const deadline = Date.now() + FUNCTIONS_TIMEOUT_MS;
+  for (;;) {
+    const status = await postJson(
+      apiUrl(endpoint, "/api/deploy/github/status"),
+      await getOidcToken(audience),
+      { deploymentId },
+    );
+    const functions = status.functions;
+    if (!functions || functions.status === "active") return;
+    if (functions.status === "refused") {
+      const details = functions.error?.details;
+      throw new Error(
+        `Naru refused the site's code: ${functions.error?.message ?? "unknown error"}${
+          details ? ` ${JSON.stringify(details)}` : ""
+        }. The files are published; the previous code stays active.`,
+      );
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        "The site's code is still activating after 15 minutes; Naru keeps trying.",
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, FUNCTIONS_POLL_MS));
+  }
+}
+
+const PREVIEW_TYPES = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+};
+
+// The image a template shows instead of screenshots of its files: for
+// templates that show nothing without their site's data or a sign-in.
+async function readPreview(previewPath) {
+  const absolutePath = path.resolve(process.cwd(), previewPath);
+  let contents;
+  try {
+    contents = await fs.readFile(absolutePath);
+  } catch {
+    throw new Error(`Preview image does not exist: ${previewPath}`);
+  }
+  const extension = absolutePath.split(".").pop().toLowerCase();
+  const contentType = PREVIEW_TYPES[extension];
+  if (!contentType) {
+    throw new Error(`A preview is a PNG, JPEG or WebP image: ${previewPath}`);
+  }
+  return {
+    absolutePath,
+    path: previewPath,
+    sha256: crypto.createHash("sha256").update(contents).digest("hex"),
+    size: contents.byteLength,
+    contentType,
+  };
+}
+
+// `dir` as a folder of the repository, which a template's post names.
+function repositoryFolder(rootDir) {
+  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+  return path.relative(workspace, rootDir).split(path.sep).join("/");
+}
+
+// The pushed commit's message, for a template version's changelog.
+async function commitMessage() {
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (!eventPath) return null;
+  try {
+    const event = JSON.parse(await fs.readFile(eventPath, "utf8"));
+    return event.head_commit?.message ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
-  const site = getInput("site", { required: true });
+  const templateOwner = getInput("template-owner");
+  const templateId = getInput("template");
+  const template = templateId || templateOwner;
+  const site = template ? "" : getInput("site", { required: true });
   const dir = getInput("dir", { required: true });
   const targetPrefix = getInput("target", { defaultValue: "/" });
   const endpoint = normalizeEndpoint(
@@ -238,33 +332,80 @@ async function main() {
   );
   const audience = getInput("audience", { defaultValue: endpoint.origin });
   const shouldFinalize = getBooleanInput("finalize", true);
+  const previewPath = getInput("preview");
+  if (previewPath && !template) {
+    throw new Error("`preview` is for templates: set `template-owner`");
+  }
+  const preview = previewPath ? await readPreview(previewPath) : null;
   const rootDir = path.resolve(process.cwd(), dir);
 
+  let rootDirectory;
+  try {
+    rootDirectory = await fs.stat(rootDir);
+  } catch {
+    throw new Error(`Deploy directory does not exist: ${dir}`);
+  }
+  if (!rootDirectory.isDirectory()) {
+    throw new Error(`Deploy path is not a directory: ${dir}`);
+  }
+
   const files = await collectFiles(rootDir);
-  if (!files.some((file) => file.path === "index.html")) {
+  if (!template && !files.some((file) => file.path === "index.html")) {
     throw new Error("Deploy directory must include index.html");
   }
 
-  info(`Planning Naru deploy for ${site} with ${files.length} file(s)`);
+  info(
+    template
+      ? `Planning the template's next version with ${files.length} file(s)`
+      : `Planning Naru deploy for ${site} with ${files.length} file(s)`,
+  );
 
   const token = await getOidcToken(audience);
   const plan = await postJson(
     apiUrl(endpoint, "/api/deploy/github/plan"),
     token,
     {
-      site,
-      targetPrefix,
+      ...(template
+        ? {
+            ...(templateId
+              ? { template: templateId }
+              : { templateOwner, folder: repositoryFolder(rootDir) }),
+            changelog: await commitMessage(),
+            ...(preview
+              ? {
+                  preview: {
+                    size: preview.size,
+                    sha256: preview.sha256,
+                    contentType: preview.contentType,
+                  },
+                }
+              : {}),
+          }
+        : { site, targetPrefix }),
       manifest: {
         files: files.map(({ absolutePath, ...file }) => file),
       },
     },
   );
 
+  if (plan.skipped) {
+    // The template's post does not exist yet; the first run after it does
+    // publishes its first version.
+    info(plan.message);
+    await appendStepSummary(`## No Naru template yet\n\n${plan.message}.\n`);
+    return;
+  }
+
   await setOutput("deployment-id", plan.deploymentId);
   info(`Uploading ${plan.uploads.length} staged file(s)`);
 
   const fileByPath = new Map(files.map((file) => [file.path, file]));
   await uploadFiles(plan.uploads, fileByPath);
+  // Absent when the template shows this image already.
+  if (plan.previewUpload) {
+    info(`Uploading the preview image ${preview.path}`);
+    await uploadFile(plan.previewUpload, preview);
+  }
 
   if (!shouldFinalize) {
     info(`Uploaded staged files for deployment ${plan.deploymentId}`);
@@ -281,11 +422,53 @@ async function main() {
     },
   );
 
+  if (finalize.functions?.status === "activating") {
+    info("Activating the site's code");
+    await waitForFunctions(endpoint, audience, plan.deploymentId);
+  }
+
+  if (template) {
+    await setOutput("deployed-files", finalize.deployedFiles ?? "");
+    await setOutput("uploaded-files", finalize.uploadedFiles ?? "");
+    await appendStepSummary(`## Naru template version published
+
+| | |
+| --- | --- |
+| Template | \`${templateId || `${templateOwner}: ${repositoryFolder(rootDir) || "/"}`}\` |
+| Version | v${finalize.version}${finalize.unchanged ? " (unchanged, no new version)" : ""} |
+| Commit | \`${process.env.GITHUB_SHA || "unknown"}\` |
+| Files | ${finalize.deployedFiles ?? 0} (${finalize.uploadedFiles ?? 0} uploaded) |
+${preview ? `| Preview | \`${preview.path}\`${finalize.previewUpdated ? " (updated)" : " (unchanged)"} |\n` : ""}`);
+    info(
+      finalize.unchanged
+        ? `Unchanged since v${finalize.version}: no new version`
+        : `Published v${finalize.version}: ${finalize.deployedFiles} file(s), ${finalize.uploadedFiles} uploaded`,
+    );
+    if (finalize.previewUpdated)
+      info(`Set the template's preview to ${preview.path}`);
+    return;
+  }
+
   await setOutput("deployed-files", finalize.deployedFiles ?? "");
+  await setOutput("uploaded-files", finalize.uploadedFiles ?? "");
   await setOutput("deleted-files", finalize.deletedFiles ?? "");
   await setOutput("directory-size", finalize.directorySize ?? "");
+  const siteUrl = `${endpoint.protocol}//${site}.${endpoint.host}/`;
+  await setOutput("site-url", siteUrl);
+  await appendStepSummary(`## Naru deployment complete
+
+| | |
+| --- | --- |
+| Site | [${siteUrl}](${siteUrl}) |
+| Commit | \`${process.env.GITHUB_SHA || "unknown"}\` |
+| Deployed files | ${finalize.deployedFiles ?? 0} |
+| Uploaded files | ${finalize.uploadedFiles ?? 0} |
+| Deleted files | ${finalize.deletedFiles ?? 0} |
+| Directory size | ${finalize.directorySize ?? 0} bytes |
+| Deployment ID | \`${plan.deploymentId}\` |
+`);
   info(
-    `Deployed ${finalize.deployedFiles} file(s), deleted ${finalize.deletedFiles} file(s)`,
+    `Deployed ${finalize.deployedFiles} file(s), uploaded ${finalize.uploadedFiles} changed file(s), deleted ${finalize.deletedFiles} file(s)`,
   );
 }
 
