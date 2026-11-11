@@ -308,7 +308,23 @@ function repositoryFolder(rootDir) {
   return path.relative(workspace, rootDir).split(path.sep).join("/");
 }
 
-// The pushed commit's message, for a template version's changelog.
+// What `changelog` is when a workflow leaves it out (action.yml's default).
+// The runner hands every declared input to the action, as "" when it has no
+// default, so a sentinel is the only way to tell "not given" from "empty".
+const CHANGELOG_FROM_COMMIT = "<commit message>";
+
+// A template version's changelog: the `changelog` input when the workflow
+// gives one, even empty (no changelog), and the pushed commit's message only
+// when it does not.
+async function templateChangelog() {
+  const given = process.env.INPUT_CHANGELOG;
+  if (given === undefined || given === CHANGELOG_FROM_COMMIT) {
+    return commitMessage();
+  }
+  return given.trim() || null;
+}
+
+// The pushed commit's message.
 async function commitMessage() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) return null;
@@ -337,6 +353,10 @@ async function main() {
     throw new Error("`preview` is for templates: set `template-owner`");
   }
   const preview = previewPath ? await readPreview(previewPath) : null;
+  const changelogInput = process.env.INPUT_CHANGELOG?.trim() ?? "";
+  if (changelogInput && changelogInput !== CHANGELOG_FROM_COMMIT && !template) {
+    throw new Error("`changelog` is for templates: set `template-owner`");
+  }
   const rootDir = path.resolve(process.cwd(), dir);
 
   let rootDirectory;
@@ -370,7 +390,7 @@ async function main() {
             ...(templateId
               ? { template: templateId }
               : { templateOwner, folder: repositoryFolder(rootDir) }),
-            changelog: await commitMessage(),
+            changelog: await templateChangelog(),
             ...(preview
               ? {
                   preview: {

@@ -16,8 +16,17 @@ inputs:
     description: >-
       A Naru template's ID, from its edit page: publishes `dir` as the
       template's next version instead of deploying a site (`template-owner`
-      needs no ID). The commit message becomes the version's changelog.
+      needs no ID).
     required: false
+  changelog:
+    description: >-
+      With `template-owner` or `template`: the new version's changelog, shown
+      publicly in the template's version history, such as the release notes
+      (`github.event.release.body`). Given, even empty, it replaces the
+      commit message, and empty means no changelog. Left out, the pushed
+      commit's message is the changelog.
+    required: false
+    default: "<commit message>"
   preview:
     description: >-
       With `template-owner` or `template`: a PNG, JPEG or WebP image (up to

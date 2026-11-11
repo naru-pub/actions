@@ -52,6 +52,8 @@ If published from a multi-action repository, use:
   version instead (see below).
 - `preview`: with a template, an image to show for it instead of a
   screenshot (see below).
+- `changelog`: with a template, the new version's changelog instead of the
+  commit message (see below).
 
 ## Outputs
 
@@ -108,4 +110,26 @@ live outside `dir`:
     dir: dist
     template-owner: my-naru-login
     preview: docs/preview.png
+```
+
+Each version's changelog is shown publicly in the template's version history.
+Left alone it is the pushed commit's message (a `push` event's
+`head_commit`; other events have none, so their versions have no changelog).
+`changelog` replaces it with the workflow's own words, and the commit message
+is then never read; an empty `changelog` means no changelog. To publish a
+template only when a release is published, with the release notes as its
+changelog:
+
+```yaml
+on:
+  release:
+    types: [published]
+
+# ...
+
+- uses: naru-pub/actions/deploy@v1
+  with:
+    dir: dist
+    template-owner: my-naru-login
+    changelog: ${{ github.event.release.body }}
 ```
